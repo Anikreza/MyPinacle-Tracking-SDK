@@ -57,6 +57,15 @@ final class ServerEventsTest extends TestCase
         $this->assertSame([['id' => '7', 'quantity' => 1, 'item_price' => 450.0]], $ev['custom_data']['contents']);
     }
 
+    public function test_content_type_defaults_to_product_and_can_be_product_group(): void
+    {
+        $cfg = $this->settings();
+        ServerEvents::send($cfg, $this->ctx(), 'ViewContent', ServerEvents::issueId('ViewContent'), [], ['contents' => [['content_id' => '7', 'content_name' => 'Shirt']]]);
+        ServerEvents::send($cfg, $this->ctx(), 'ViewContent', ServerEvents::issueId('ViewContent'), [], ['contents' => [['content_id' => '8', 'content_name' => 'Tee']], 'content_type' => 'product_group']);
+        $meta = $this->metaRequests();
+        $this->assertSame('product', $meta[0][0]->data()['data'][0]['custom_data']['content_type']);
+        $this->assertSame('product_group', $meta[1][0]->data()['data'][0]['custom_data']['content_type']);
+    }
     public function test_country_prefers_address_then_store_default_and_is_omitted_when_unknown(): void
     {
         $cfg = $this->settings();

@@ -2,7 +2,7 @@
     "name": "mypinacle/tracking-sdk",
     "description": "Shared server-side tracking for MyPinacle apps: Meta Graph/Conversions API, TikTok Events API, GA4 Measurement Protocol, hashing, country resolution, signed server event ids and send-once idempotency.",
     "type": "library",
-    "license": "proprietary",
+    "license": "MIT",
     "require": {
         "php": "^8.1",
         "illuminate/support": "^10.0",

@@ -64,6 +64,7 @@ final class ServerEvents
                 'currency' => $properties['currency'],
                 'content_ids' => $contents ? array_map(fn ($c) => (string) ($c['content_id'] ?? ''), $contents) : null,
                 'content_name' => $contents[0]['content_name'] ?? null,
+                'content_type' => $properties['content_type'] ?? null, // e.g. product_group for a ViewContent of a product with variants
                 'contents' => $contents ? self::metaContents($contents) : null,
                 'num_items' => $contents ? array_sum(array_map(fn ($c) => (int) ($c['quantity'] ?? 1), $contents)) : null,
                 'search_string' => $properties['query'] ?? null,
