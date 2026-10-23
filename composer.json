@@ -1,0 +1,30 @@
+{
+    "name": "mypinacle/tracking-sdk",
+    "description": "Shared server-side tracking for MyPinacle apps: Meta Graph/Conversions API, TikTok Events API, GA4 Measurement Protocol, hashing, country resolution, signed server event ids and send-once idempotency.",
+    "type": "library",
+    "license": "proprietary",
+    "require": {
+        "php": "^8.1",
+        "illuminate/support": "^10.0",
+        "illuminate/http": "^10.0",
+        "illuminate/database": "^10.0",
+        "illuminate/cache": "^10.0",
+        "guzzlehttp/guzzle": "^7.5"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^8.0",
+        "phpunit/phpunit": "^10.0"
+    },
+    "autoload": {
+        "psr-4": { "MyPinacle\\Tracking\\": "src/" }
+    },
+    "autoload-dev": {
+        "psr-4": { "MyPinacle\\Tracking\\Tests\\": "tests/" }
+    },
+    "extra": {
+        "laravel": { "providers": ["MyPinacle\\Tracking\\TrackingServiceProvider"] }
+    },
+    "scripts": { "test": "phpunit" },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
