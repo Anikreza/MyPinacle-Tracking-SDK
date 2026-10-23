@@ -21,29 +21,15 @@ Keys are only ever read from the database by the app adapters.
 
 Tests: `composer install && php -d extension=pdo_sqlite vendor/bin/phpunit`
 
-## Local development (path repository)
-Both apps' composer.json contain:
+## Install
+The repository is public, so no credentials, deploy keys or auth.json are needed. In the app's composer.json:
 ```json
-"repositories": [{"type": "path", "url": "../MyPinacle-Tracking-SDK",
-  "options": {"symlink": true, "versions": {"mypinacle/tracking-sdk": "1.0.0"}}}],
-"require": {"mypinacle/tracking-sdk": "^1.0"}
+"repositories": [
+    {"type": "vcs", "url": "https://github.com/Anikreza/MyPinacle-Tracking-SDK"}
+]
 ```
-A path repository only works where `../MyPinacle-Tracking-SDK` exists, so do not deploy a lock file built from it.
+then `composer require mypinacle/tracking-sdk:^1.0`. For an app that shares the database, run the `tracking_event_claims`
+migration line from Inventory `run-migrations.txt` once.
 
-## Switch to the private GitHub repo (before deploying)
-1. `gh repo create Anikreza/MyPinacle-Tracking-SDK --private`, then in this folder:
-   `git remote add origin https://github.com/Anikreza/MyPinacle-Tracking-SDK.git && git push -u origin main && git tag v1.0.0 && git push origin v1.0.0`
-2. In each app replace the repository entry with
-   `{"type": "vcs", "url": "https://github.com/Anikreza/MyPinacle-Tracking-SDK.git"}`
-   then `composer update mypinacle/tracking-sdk` and commit composer.json + composer.lock.
-3. Each server needs read access. Pick one:
-   - **Deploy key (SSH):** on the server `ssh-keygen -t ed25519 -f ~/.ssh/mypinacle_sdk -N ""`, add the `.pub` under
-     GitHub repo Settings → Deploy keys (read-only). Add a `~/.ssh/config` entry
-     `Host github.com` / `IdentityFile ~/.ssh/mypinacle_sdk` / `IdentitiesOnly yes` (GitHub allows a deploy key on only
-     one repo; with several repos use a `Host github-sdk` alias and that host in the vcs url).
-   - **auth.json (HTTPS):** a fine-grained token with Contents: read on this repo only, and in the app root (not committed)
-     `{"github-oauth": {"github.com": "<token>"}}` — or `composer config --auth github-oauth.github.com <token>`.
-     Then use the `https://github.com/Anikreza/MyPinacle-Tracking-SDK.git` url.
-4. Deploy: `composer install --no-dev`, then run the `tracking_event_claims` migration line from Inventory `run-migrations.txt`
-   (one shared database, run once).
-5. Release: bump, tag `v1.x.y`, `composer update mypinacle/tracking-sdk` in each app.
+Release: tag `v1.x.y`, push the tag, then `composer update mypinacle/tracking-sdk` in each app.
+(Registering the package on Packagist would make the `repositories` entry unnecessary.)
