@@ -7,6 +7,7 @@ use MyPinacle\Tracking\Delivery;
 use MyPinacle\Tracking\Graph;
 use MyPinacle\Tracking\Http\OutgoingRequest;
 use MyPinacle\Tracking\Support\Country;
+use MyPinacle\Tracking\Support\EventTime;
 use MyPinacle\Tracking\Support\Hashing;
 use MyPinacle\Tracking\TrackingContext;
 
@@ -19,34 +20,44 @@ final class MetaConversionsApi
     /**
      * @param  array<string, mixed>  $payload  event_id, email, phone, first_name, last_name, city, country, external_id, value,
      *                                         currency, content_ids, content_name, contents, order_id, num_items, search_string,
+     *                                         event_time (unix / DateTimeInterface, default now),
      *                                         + log fields sale_order_id, session_id, utm_*
      * @return array<string, mixed>|null the request body when dispatched
      */
     public static function send(TrackingSettings $cfg, TrackingContext $ctx, string $eventName, array $payload): ?array
     {
         $eventId = (string) ($payload['event_id'] ?? '');
-        if ($eventId === '' || !$cfg->flag('TRACKING_ENABLED', true)) {
+        if ($eventId === '' || !self::configured($cfg)) {
             return null;
         }
-        $pixelId = $cfg->str('FACEBOOK_PIXEL_ID');
-        $token = $cfg->str('FACEBOOK_CAPI_TOKEN');
-        if ($pixelId === '' || $token === '') {
-            return null;
-        }
-        $log = self::logFields($cfg, $payload, $ctx);
         // Cookie banner on and no marketing consent: server-side events are tracking too - send nothing.
         if (!$ctx->marketing) {
-            Delivery::skipped('meta', $eventName, $eventId, 'no marketing consent', $log);
+            Delivery::skipped('meta', $eventName, $eventId, 'no marketing consent', self::logFields($cfg, $payload, $ctx));
 
+            return null;
+        }
+        $request = self::request($cfg, $ctx, $eventName, $payload);
+
+        return $request && Delivery::send($request) ? $request->body : null;
+    }
+
+    /**
+     * The fully built request, NOT dispatched and NOT claimed in the send-once ledger (for an app outbox that performs and
+     * retries it itself). Null when tracking is off, keys are missing, there is no event id or no marketing consent.
+     */
+    public static function request(TrackingSettings $cfg, TrackingContext $ctx, string $eventName, array $payload): ?OutgoingRequest
+    {
+        $eventId = (string) ($payload['event_id'] ?? '');
+        if ($eventId === '' || !self::configured($cfg) || !$ctx->marketing) {
             return null;
         }
         $body = ['data' => [self::buildEvent($cfg, $ctx, $eventName, $eventId, $payload)]];
         if (($test = $cfg->str('FACEBOOK_CAPI_TEST_CODE')) !== '') {
             $body['test_event_code'] = $test;
         }
-        $url = Graph::url(rawurlencode($pixelId) . '/events') . '?access_token=' . rawurlencode($token);
+        $url = Graph::url(rawurlencode($cfg->str('FACEBOOK_PIXEL_ID')) . '/events') . '?access_token=' . rawurlencode($cfg->str('FACEBOOK_CAPI_TOKEN'));
 
-        return Delivery::send(new OutgoingRequest('meta', $eventName, $eventId, $url, [], $body, $log)) ? $body : null;
+        return new OutgoingRequest('meta', $eventName, $eventId, $url, [], $body, self::logFields($cfg, $payload, $ctx));
     }
 
     /** @return array<string, mixed> one entry of the Conversions API `data` array */
@@ -87,13 +98,18 @@ final class MetaConversionsApi
 
         return [
             'event_name' => $eventName,
-            'event_time' => time(),
+            'event_time' => EventTime::unix($payload['event_time'] ?? null),
             'event_id' => $eventId,
             'event_source_url' => $ctx->pageUrl ?: url('/'),
             'action_source' => 'website',
             'user_data' => $user,
             'custom_data' => $custom,
         ];
+    }
+
+    private static function configured(TrackingSettings $cfg): bool
+    {
+        return $cfg->flag('TRACKING_ENABLED', true) && $cfg->str('FACEBOOK_PIXEL_ID') !== '' && $cfg->str('FACEBOOK_CAPI_TOKEN') !== '';
     }
 
     private static function logFields(TrackingSettings $cfg, array $p, TrackingContext $ctx): array

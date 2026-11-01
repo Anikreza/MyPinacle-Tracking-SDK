@@ -4,6 +4,7 @@ namespace MyPinacle\Tracking;
 
 use MyPinacle\Tracking\Contracts\EventLedger;
 use MyPinacle\Tracking\Contracts\TrackingSettings;
+use MyPinacle\Tracking\Http\OutgoingRequest;
 use MyPinacle\Tracking\Platforms\Ga4MeasurementProtocol;
 use MyPinacle\Tracking\Platforms\MetaConversionsApi;
 use MyPinacle\Tracking\Platforms\TikTokEventsApi;
@@ -21,8 +22,13 @@ final class ServerEvents
     /** Short id prefix per event (readable in Events Manager and marketing_events). */
     public const PREFIX = [
         'ViewContent' => 'vc', 'AddToCart' => 'atc', 'InitiateCheckout' => 'ic', 'AddPaymentInfo' => 'api', 'Search' => 'srch',
-        'CompleteRegistration' => 'reg', 'AddToWishlist' => 'wish', 'Purchase' => 'order',
+        'CompleteRegistration' => 'reg', 'AddToWishlist' => 'wish', 'Purchase' => 'order', 'OrderPlaced' => 'placed',
     ];
+
+    /** Order placed but not yet confirmed (confirmed-order purchase tracking): Meta custom event / TikTok standard event. */
+    public const META_ORDER_PLACED = 'OrderPlaced';
+
+    public const TIKTOK_ORDER_PLACED = 'PlaceAnOrder';
 
     /**
      * The event id for one browser action, always minted by the server: a valid id the server issued earlier (rendered
@@ -78,7 +84,8 @@ final class ServerEvents
      * orders confirmed by a payment gateway ($gateway !== null) - GA4 Measurement Protocol, since that shopper may never
      * reach the thank-you page where the browser fires GA4.
      *
-     * @param  array<string, mixed>  $p  event_id, transaction_id, value, currency, shipping, contents (TikTok shape), num_items
+     * @param  array<string, mixed>  $p  event_id, transaction_id, value, currency, shipping, contents (TikTok shape), num_items,
+     *                                   optional event_time (unix / DateTimeInterface), ga_session_id, timestamp_micros
      * @param  array<string, mixed>  $user  userFields() keys + sale_order_id, utm_source/medium/campaign
      */
     public static function purchase(TrackingSettings $cfg, TrackingContext $ctx, array $p, array $user, ?string $gateway = null): void
@@ -95,39 +102,82 @@ final class ServerEvents
         $contents = array_values((array) ($p['contents'] ?? []));
         $currency = (string) ($p['currency'] ?? $cfg->currency());
 
-        TikTokEventsApi::send($cfg, $ctx, 'CompletePayment', $eventId, $user, [
-            'contents' => $contents,
-            'value' => (float) $p['value'],
-            'currency' => $currency,
-        ]);
-
-        MetaConversionsApi::send($cfg, $ctx, 'Purchase', self::userFields($user) + [
-            'event_id' => $eventId,
-            'value' => (float) $p['value'],
-            'currency' => $currency,
-            'content_ids' => array_map(fn ($c) => (string) $c['content_id'], $contents),
-            'contents' => self::metaContents($contents),
-            'num_items' => $p['num_items'] ?? array_sum(array_map(fn ($c) => (int) ($c['quantity'] ?? 1), $contents)),
-            'order_id' => (string) ($p['transaction_id'] ?? ''),
-            'sale_order_id' => $user['sale_order_id'] ?? null,
-            'utm_source' => $user['utm_source'] ?? null,
-            'utm_medium' => $user['utm_medium'] ?? null,
-            'utm_campaign' => $user['utm_campaign'] ?? null,
-            'session_id' => $ctx->sessionId,
-        ]);
+        TikTokEventsApi::send($cfg, $ctx, 'CompletePayment', $eventId, $user, self::tikTokProperties($p, $contents, $currency), self::timeOption($p));
+        MetaConversionsApi::send($cfg, $ctx, 'Purchase', self::metaOrderPayload($ctx, $p, $user, $contents, $currency));
 
         if ($gateway !== null) {
-            Ga4MeasurementProtocol::purchase($cfg, $ctx, (string) $p['transaction_id'], (float) $p['value'], array_map(fn ($c) => [
-                'item_id' => (string) $c['content_id'],
-                'item_name' => (string) ($c['content_name'] ?? 'Product'),
-                'price' => (float) ($c['price'] ?? 0),
-                'quantity' => (int) ($c['quantity'] ?? 1),
-            ], $contents), !empty($user['external_id']) ? (string) $user['external_id'] : null, [
-                'shipping' => $p['shipping'] ?? null,
-                'payment_type' => $gateway !== '' ? $gateway : null,
-                'sale_order_id' => $user['sale_order_id'] ?? null,
-            ]);
+            Ga4MeasurementProtocol::purchase($cfg, $ctx, $tx, (float) $p['value'], self::ga4Items($contents), self::gaUserId($user), self::ga4Extra($p, $user, $gateway !== '' ? $gateway : null));
         }
+    }
+
+    /**
+     * Purchase requests for an app outbox: built, NOT dispatched, NOT claimed in any ledger (the outbox owns idempotency and
+     * retries; the same event_id / transaction_id on every retry lets each platform deduplicate too). Channels with no
+     * keys / consent are absent from the result.
+     *
+     * @param  array<string, mixed>  $p  as purchase(); event_time = when the order was placed (or confirmed), payment_type optional
+     * @param  list<'meta'|'tiktok'|'ga4'>  $channels
+     * @return array<'meta'|'tiktok'|'ga4', OutgoingRequest>
+     */
+    public static function purchaseRequests(TrackingSettings $cfg, TrackingContext $ctx, array $p, array $user, array $channels = ['meta', 'tiktok', 'ga4']): array
+    {
+        $eventId = (string) ($p['event_id'] ?? '');
+        $tx = (string) ($p['transaction_id'] ?? '');
+        if ($eventId === '') {
+            return [];
+        }
+        $contents = array_values((array) ($p['contents'] ?? []));
+        $currency = (string) ($p['currency'] ?? $cfg->currency());
+        $out = [];
+        if (in_array('meta', $channels, true)) {
+            $out['meta'] = MetaConversionsApi::request($cfg, $ctx, 'Purchase', self::metaOrderPayload($ctx, $p, $user, $contents, $currency));
+        }
+        if (in_array('tiktok', $channels, true)) {
+            $out['tiktok'] = TikTokEventsApi::request($cfg, $ctx, 'CompletePayment', $eventId, $user, self::tikTokProperties($p, $contents, $currency), self::timeOption($p));
+        }
+        if (in_array('ga4', $channels, true) && $tx !== '') {
+            $out['ga4'] = Ga4MeasurementProtocol::purchaseRequest($cfg, $ctx, $tx, (float) ($p['value'] ?? 0), self::ga4Items($contents), self::gaUserId($user), self::ga4Extra($p, $user, $p['payment_type'] ?? null));
+        }
+
+        return array_filter($out);
+    }
+
+    /**
+     * GA4 refund request for an app outbox (built, not dispatched). Full refund: $value null and no contents.
+     *
+     * @param  array<string, mixed>  $p  transaction_id, value (null = full), contents (TikTok shape, returned lines), refund_ref,
+     *                                   event_time / timestamp_micros, ga_session_id
+     */
+    public static function refundRequest(TrackingSettings $cfg, TrackingContext $ctx, array $p, array $user = []): ?OutgoingRequest
+    {
+        $contents = array_values((array) ($p['contents'] ?? []));
+
+        return Ga4MeasurementProtocol::refundRequest($cfg, $ctx, (string) ($p['transaction_id'] ?? ''), isset($p['value']) ? (float) $p['value'] : null,
+            self::ga4Items($contents), self::gaUserId($user), self::ga4Extra($p, $user, null) + ['refund_ref' => $p['refund_ref'] ?? null]);
+    }
+
+    /**
+     * Order placed, not yet confirmed (confirmed-order purchase tracking): Meta custom event OrderPlaced + TikTok
+     * PlaceAnOrder, with the same event id the browser pixels use. Sent once per transaction_id. Use an event id DIFFERENT
+     * from the order's Purchase event id (prefix "placed"), so the later Purchase is never deduplicated against it.
+     *
+     * @param  array<string, mixed>  $p  event_id, transaction_id, value, currency, contents (TikTok shape), num_items, event_time
+     */
+    public static function orderPlaced(TrackingSettings $cfg, TrackingContext $ctx, array $p, array $user): void
+    {
+        $eventId = (string) ($p['event_id'] ?? '');
+        if ($eventId === '') {
+            return;
+        }
+        $tx = (string) ($p['transaction_id'] ?? '');
+        if ($tx !== '' && ! app(EventLedger::class)->claim('order_placed', 'tx:' . $tx)) {
+            return;
+        }
+        $contents = array_values((array) ($p['contents'] ?? []));
+        $currency = (string) ($p['currency'] ?? $cfg->currency());
+
+        TikTokEventsApi::send($cfg, $ctx, self::TIKTOK_ORDER_PLACED, $eventId, $user, self::tikTokProperties($p, $contents, $currency), self::timeOption($p));
+        MetaConversionsApi::send($cfg, $ctx, self::META_ORDER_PLACED, self::metaOrderPayload($ctx, $p, $user, $contents, $currency));
     }
 
     /**
@@ -156,6 +206,62 @@ final class ServerEvents
     private static function userFields(array $u): array
     {
         return array_intersect_key($u, array_flip(['email', 'phone', 'external_id', 'first_name', 'last_name', 'city', 'country']));
+    }
+
+    private static function metaOrderPayload(TrackingContext $ctx, array $p, array $user, array $contents, string $currency): array
+    {
+        return self::userFields($user) + [
+            'event_id' => (string) $p['event_id'],
+            'event_time' => $p['event_time'] ?? null,
+            'value' => (float) ($p['value'] ?? 0),
+            'currency' => $currency,
+            'content_ids' => array_map(fn ($c) => (string) ($c['content_id'] ?? ''), $contents),
+            'contents' => self::metaContents($contents),
+            'num_items' => $p['num_items'] ?? array_sum(array_map(fn ($c) => (int) ($c['quantity'] ?? 1), $contents)),
+            'order_id' => (string) ($p['transaction_id'] ?? ''),
+            'sale_order_id' => $user['sale_order_id'] ?? null,
+            'utm_source' => $user['utm_source'] ?? null,
+            'utm_medium' => $user['utm_medium'] ?? null,
+            'utm_campaign' => $user['utm_campaign'] ?? null,
+            'session_id' => $ctx->sessionId,
+        ];
+    }
+
+    private static function tikTokProperties(array $p, array $contents, string $currency): array
+    {
+        return ['contents' => $contents, 'value' => (float) ($p['value'] ?? 0), 'currency' => $currency];
+    }
+
+    private static function timeOption(array $p): array
+    {
+        return isset($p['event_time']) ? ['event_time' => $p['event_time']] : [];
+    }
+
+    private static function ga4Items(array $contents): array
+    {
+        return array_map(fn ($c) => [
+            'item_id' => (string) ($c['content_id'] ?? ''),
+            'item_name' => (string) ($c['content_name'] ?? 'Product'),
+            'price' => (float) ($c['price'] ?? 0),
+            'quantity' => (int) ($c['quantity'] ?? 1),
+        ], $contents);
+    }
+
+    private static function ga4Extra(array $p, array $user, ?string $paymentType): array
+    {
+        return array_filter([
+            'shipping' => $p['shipping'] ?? null,
+            'payment_type' => $paymentType,
+            'sale_order_id' => $user['sale_order_id'] ?? null,
+            'event_time' => $p['event_time'] ?? null,
+            'timestamp_micros' => $p['timestamp_micros'] ?? null,
+            'ga_session_id' => $p['ga_session_id'] ?? null,
+        ], fn ($v) => $v !== null);
+    }
+
+    private static function gaUserId(array $user): ?string
+    {
+        return !empty($user['external_id']) ? (string) $user['external_id'] : null;
     }
 
     /** TikTok contents -> Meta contents [id, quantity, item_price]. */

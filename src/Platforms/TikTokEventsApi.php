@@ -5,6 +5,7 @@ namespace MyPinacle\Tracking\Platforms;
 use MyPinacle\Tracking\Contracts\TrackingSettings;
 use MyPinacle\Tracking\Delivery;
 use MyPinacle\Tracking\Http\OutgoingRequest;
+use MyPinacle\Tracking\Support\EventTime;
 use MyPinacle\Tracking\Support\Hashing;
 use MyPinacle\Tracking\TrackingContext;
 
@@ -19,8 +20,20 @@ final class TikTokEventsApi
     /**
      * @param  array<string, mixed>  $user  email / phone / external_id (raw - hashed here), sale_order_id
      * @param  array<string, mixed>  $properties  contents[content_id, content_name, quantity, price], value, currency, query
+     * @param  array<string, mixed>  $options  event_time (unix / DateTimeInterface, default now)
      */
-    public static function send(TrackingSettings $cfg, TrackingContext $ctx, string $event, string $eventId, array $user = [], array $properties = []): ?array
+    public static function send(TrackingSettings $cfg, TrackingContext $ctx, string $event, string $eventId, array $user = [], array $properties = [], array $options = []): ?array
+    {
+        $request = self::request($cfg, $ctx, $event, $eventId, $user, $properties, $options);
+
+        return $request && Delivery::send($request) ? $request->body : null;
+    }
+
+    /**
+     * The fully built request, NOT dispatched and NOT claimed in the send-once ledger (for an app outbox). Null when TikTok
+     * server events are off, keys are missing, there is no event id or no marketing consent.
+     */
+    public static function request(TrackingSettings $cfg, TrackingContext $ctx, string $event, string $eventId, array $user = [], array $properties = [], array $options = []): ?OutgoingRequest
     {
         $token = $cfg->str('TIKTOK_ACCESS_TOKEN');
         $pixelId = $cfg->str('TIKTOK_PIXEL_ID');
@@ -36,7 +49,7 @@ final class TikTokEventsApi
             'data' => [[
                 'event' => $event,
                 'event_id' => $eventId,
-                'event_time' => time(),
+                'event_time' => EventTime::unix($options['event_time'] ?? null),
                 // Events API 2.0 field names are `ip` and `user_agent`.
                 'user' => array_filter([
                     'ip' => $ctx->ip,
@@ -55,11 +68,11 @@ final class TikTokEventsApi
             $body['test_event_code'] = $test;
         }
 
-        return Delivery::send(new OutgoingRequest('tiktok', $event, $eventId, self::ENDPOINT, ['Access-Token' => $token], $body, [
+        return new OutgoingRequest('tiktok', $event, $eventId, self::ENDPOINT, ['Access-Token' => $token], $body, [
             'value' => $properties['value'] ?? null,
             'currency' => $properties['currency'] ?? $cfg->currency(),
             'sale_order_id' => $user['sale_order_id'] ?? null,
             'session_id' => $ctx->sessionId,
-        ])) ? $body : null;
+        ]);
     }
 }

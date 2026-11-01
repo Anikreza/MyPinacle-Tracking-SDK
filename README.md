@@ -12,7 +12,8 @@ Laravel 10, PHP ^8.1. The service provider is auto-discovered.
 | `src/Support/Country.php` | any country code / ISO3 / name → lowercase ISO-2, unknown → null (field omitted) |
 | `src/Support/EventIds.php` | signed server event ids `{prefix}_{body}_{sig}`; deterministic per (event, nonce, scope) for retries |
 | `src/Ledger/` | send-once ledger: `tracking_event_claims` unique (channel, event_id), cache fallback |
-| `src/ServerEvents.php` | `issueId()`, `send()` (browser events), `purchase()` (one per order), `browserPurchase()` |
+| `src/ServerEvents.php` | `issueId()`, `send()` (browser events), `purchase()` (one per order), `orderPlaced()` (Meta `OrderPlaced` + TikTok `PlaceAnOrder`), `purchaseRequests()` / `refundRequest()` (built, not sent: for an app outbox), `browserPurchase()` |
+| `src/Support/EventTime.php` | `event_time` (Meta/TikTok, unix) and GA4 `timestamp_micros` from unix / DateTime / date string |
 | `src/TrackingContext.php` | consent + pixel cookies / click ids (from cookies or a headless request body) |
 | `src/Contracts/` | what each app provides: `TrackingSettings` (DB-read keys), `TrackingTransport` (job + marketing_events), `EventLedger` |
 
@@ -30,6 +31,8 @@ The repository is public, so no credentials, deploy keys or auth.json are needed
 ```
 then `composer require mypinacle/tracking-sdk:^1.0`. For an app that shares the database, run the `tracking_event_claims`
 migration line from Inventory `run-migrations.txt` once.
+
+Changes per version: `CHANGELOG.md` (current: 1.2.0).
 
 Release: tag `v1.x.y`, push the tag, then `composer update mypinacle/tracking-sdk` in each app.
 (Registering the package on Packagist would make the `repositories` entry unnecessary.)
